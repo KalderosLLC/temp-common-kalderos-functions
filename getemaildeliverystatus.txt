@@ -1,0 +1,122 @@
+#r "function-support.dll"
+#r "Newtonsoft.json"
+#r "System.Data"
+using System.Net;
+using System.Data;
+using System.Data.SqlClient;
+
+using Newtonsoft.Json;
+using System.Text;
+using Kalderos.Database;
+
+
+public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, TraceWriter log)
+{
+    string  details = "";
+    bool isDelivered = false; 
+    bool includeHistory = false;
+    string processedTime = "";
+    string emailStatus = "";
+    bool itemFound = false;
+
+    log.Info("C# HTTP trigger function processed a request.");
+    
+    // parse query parameter
+    string msgId = req.GetQueryNameValuePairs()
+        .FirstOrDefault(q => string.Compare(q.Key, "msgId", true) == 0)
+        .Value;
+
+    string email = req.GetQueryNameValuePairs()
+        .FirstOrDefault(q => string.Compare(q.Key, "email", true) == 0)
+        .Value;
+
+     string historyFlag = req.GetQueryNameValuePairs()
+        .FirstOrDefault(q => string.Compare(q.Key, "includeHistory", true) == 0)
+        .Value;
+
+    if (historyFlag=="1") {
+        includeHistory = true;
+    }
+
+    try {
+       using(var conn = new ConnectionFactory().GetSqlConnection("grappa"))
+        {
+            string selectQry = @"select address, event, timestamp from [common].[emailEvent] where sgMessageId like'%" + msgId + "%' and address = '"+ email +"' order by timestamp desc";
+            using(SqlCommand cmd =new SqlCommand())
+            {
+                cmd.CommandText = selectQry;
+                cmd.CommandType = CommandType.Text;
+                cmd.Connection = conn;
+                conn.Open();
+
+                bool isFirst = true;
+
+                using (SqlDataReader reader = cmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                itemFound = true;
+                                string emailAddress = reader.GetString(0);
+                                string emailEvent = reader.GetString(1);
+                                string timeStamp =  reader.GetDateTime(2).ToString();
+                                emailStatus = emailEvent;
+                                // flag if the item was delivered
+                                if (emailEvent.ToLower()=="delivered") {
+                                    isDelivered = true;
+                                }
+
+                                // save when the item was processed
+                                if (emailEvent.ToLower()=="processed") {
+                                    processedTime = timeStamp;
+                                }
+
+                                var myObj = new {EmailAddress = emailAddress, Event=emailEvent};
+                                var json = JsonConvert.SerializeObject(myObj);
+
+                                if (isFirst) {
+                                    isFirst = false;
+                                }
+                                else {
+                                    details = details + ",";
+                                }
+
+                                // don't return email address for security reasons
+                                details = details + "{\"Event\":\"" + emailEvent + "\",\"TimeStamp\":\"" + timeStamp + "\"}";
+                            }
+                        }
+            }
+        }
+
+        // check if any item found
+        if (itemFound == false) {
+            return req.CreateResponse(HttpStatusCode.NotFound, "No messages found for the supplied msgId");
+        }
+
+        // prepend overall delivery status
+        string rtn = "{\"Delivered\":\"";
+        if (isDelivered) {
+            rtn += "True\"";
+        
+        }
+        else {
+            rtn += "False\"";
+        
+        } 
+        rtn += ",\"ProcessedTimeStamp\":\"" + processedTime + "\""; 
+        rtn += ",\"EmailStatus\":\"" + emailStatus + "\""; 
+        // add history
+        if (includeHistory) {
+            rtn += ",\"History\":[" + details +"]";
+        }
+
+        // outer root closing bracket
+        rtn +=  "}";
+
+        return new HttpResponseMessage(HttpStatusCode.OK) {
+            Content = new StringContent(rtn, Encoding.UTF8, "application/json")};        
+    }
+    catch(Exception ex) {
+        log.Info("exception occurred");
+        return req.CreateResponse(HttpStatusCode.InternalServerError, "Unexpected error: " + ex.Message);
+    }    
+}
